@@ -4,21 +4,16 @@ import os
 import re
 from io import StringIO, BytesIO
 
-# -------------------------------------------------
-# Original Logic (unchanged)
-# -------------------------------------------------
+# --- Original Logic (unchanged) ---
 
 def contains_special_chars(s):
     if pd.isna(s):
         return False
-
     pattern = re.compile(r'[^a-zA-Z0-9\s-]')
     return bool(pattern.search(str(s)))
 
-
 def read_file(file):
     filename = file.name.lower()
-
     if filename.endswith('.xlsx'):
         return pd.read_excel(file, dtype=str, keep_default_na=False, engine='openpyxl')
     elif filename.endswith('.csv'):
@@ -26,52 +21,85 @@ def read_file(file):
     else:
         raise ValueError(f"Unsupported file format for {filename}. Please use .csv or .xlsx")
 
-
 def clean_tower(tower_value):
     if not tower_value or str(tower_value).strip().lower() in ['n/a', 'na', '', 'N/A']:
         return ''
     return str(tower_value).strip()
 
-
 # -------------------------------------------------
-# STREAMLIT SPECIAL CHARACTER REVIEW HANDLER
+# STREAMLIT SPECIAL CHARACTER REVIEW HANDLER (Modified for Session State)
 # -------------------------------------------------
 
-def review_special_char_rows(df, key_prefix):
+def review_special_char_rows(df, file_key):
     """
-    Since Streamlit cannot open dialogs, this section appears on the webpage
-    whenever special-character rows exist.
+    Handles user decision for special character rows using session state.
+    
+    Returns the decision ('keep', 'delete', 'cancel') or None if pending.
     """
+    decision_key = f"decision_{file_key}"
+    
     st.warning("⚠️ Special characters detected in this file!")
     st.write("Choose whether to keep or delete the rows before continuing.")
 
     st.dataframe(df)
 
-    choice = st.radio(
+    # Initialize session state for the decision if not present
+    if decision_key not in st.session_state:
+        st.session_state[decision_key] = None
+
+    # Use a callback function to capture the radio button change
+    def set_radio_choice():
+        st.session_state[f"choice_{file_key}"] = st.session_state[f"radio_{file_key}"]
+
+    st.radio(
         "Select an action:",
         ("Keep These Rows", "Delete These Rows", "Cancel Processing"),
-        key=f"radio_{key_prefix}"
+        key=f"radio_{file_key}",
+        on_change=set_radio_choice
     )
 
-    if st.button("Confirm", key=f"confirm_{key_prefix}"):
-        if choice == "Keep These Rows":
-            return "keep"
-        elif choice == "Delete These Rows":
-            return "delete"
-        else:
-            return "cancel"
+    # The choice defaults to the first option if the radio has never been clicked
+    current_choice = st.session_state.get(f"choice_{file_key}", "Keep These Rows")
 
-    return None  # No decision yet
+    def set_decision():
+        # Set the final decision on button click
+        st.session_state[decision_key] = {
+            "Keep These Rows": "keep",
+            "Delete These Rows": "delete",
+            "Cancel Processing": "cancel"
+        }.get(current_choice)
+        # Manually rerun the script after setting the decision to proceed
+        st.experimental_rerun() 
 
+    # Only show the button if a decision is pending
+    if st.session_state[decision_key] is None:
+        st.button("Confirm", key=f"confirm_{file_key}", on_click=set_decision)
+        # Stop processing here, waiting for the button click to set the decision
+        st.stop()
+    
+    # Return the saved decision
+    return st.session_state[decision_key]
 
 # -------------------------------------------------
-# Main Cleaning Logic (modified only for Streamlit I/O)
+# Main Cleaning Logic (Modified for Session State)
 # -------------------------------------------------
 
 def clean_units_streamlit(file, file_key):
-    try:
-        df = read_file(file)
+    # Use session state to store and retrieve the final result message
+    result_key = f"result_{file_key}"
+    
+    # 1. Check if processing is complete for this file
+    if result_key in st.session_state:
+        return st.session_state[result_key]
 
+    try:
+        # Load the file content into session state to survive reruns
+        data_key = f"data_{file_key}"
+        if data_key not in st.session_state:
+            st.session_state[data_key] = read_file(file)
+
+        df = st.session_state[data_key].copy()
+        
         special_char_mask = df.apply(
             lambda row: row.astype(str).apply(contains_special_chars).any(),
             axis=1
@@ -80,26 +108,33 @@ def clean_units_streamlit(file, file_key):
         problem_rows = df[special_char_mask]
         deleted_rows_count = 0
 
+        # 2. Special Character Review
         if not problem_rows.empty:
             st.subheader(f"File: {file.name}")
-            decision = review_special_char_rows(problem_rows, file_key)
-
-            if decision is None:
-                st.stop()  # Wait for user decision
+            decision = review_special_char_rows(problem_rows, file_key) 
+            
+            # Note: review_special_char_rows now handles st.stop() when pending.
+            # If we reach here, a decision has been made and is saved in session state.
 
             if decision == "delete":
+                # Only delete from the working dataframe copy
                 df.drop(problem_rows.index, inplace=True)
                 deleted_rows_count = len(problem_rows)
 
             elif decision == "cancel":
-                return f"🟡 Canceled processing for {file.name}."
+                # Save the cancellation result and return
+                st.session_state[result_key] = f"🟡 Canceled processing for {file.name}."
+                return st.session_state[result_key]
 
+        # 3. Main Cleaning Logic (Only runs after decision or if no special chars)
+        
         tower_col = next((c for c in df.columns if 'tower' in c.lower()), None)
         unit_col = next((c for c in df.columns if 'unit' in c.lower()), None)
         corp_col = next((c for c in df.columns if 'corporate' in c.lower()), None)
 
         if not unit_col:
-            return f"⚠️ No 'Unit' column found in {file.name}."
+            st.session_state[result_key] = f"⚠️ No 'Unit' column found in {file.name}."
+            return st.session_state[result_key]
 
         df['_CleanUnit'] = df[unit_col].apply(lambda x: x.strip())
         duplicate_units = df[df.duplicated('_CleanUnit', keep=False)]
@@ -131,14 +166,19 @@ def clean_units_streamlit(file, file_key):
         df_unique.drop(columns=['_CleanUnit'], inplace=True)
         df_unique.replace({'N/A': '', 'n/a': '', 'na': '', '': ''}, inplace=True)
 
-        # Output file as downloadable CSV
+        # 4. Output and Final Message
+        
+        # We need to save the output data in session state for the download button
+        # to persist across reruns without re-calculating.
         output = df_unique.to_csv(index=False).encode('utf-8')
+        st.session_state[f"output_{file_key}"] = output
 
         st.download_button(
             label=f"⬇️ Download Cleaned File ({file.name})",
             data=output,
             file_name=file.name.replace('.xlsx', '_cleaned.csv').replace('.csv', '_cleaned.csv'),
-            mime='text/csv'
+            mime='text/csv',
+            key=f"download_{file_key}"
         )
 
         result_message = f"✅ Processed: {file.name}\n"
@@ -146,35 +186,72 @@ def clean_units_streamlit(file, file_key):
             result_message += f"🗑️ Deleted {deleted_rows_count} rows with special characters.\n"
         result_message += f"🔢 Total Unique Units: {len(df_unique)}"
 
-        return result_message
+        # Save the final result message and return
+        st.session_state[result_key] = result_message
+        return st.session_state[result_key]
 
     except Exception as e:
-        return f"❌ Error processing {file.name}: {e}"
-
+        # Save the error result and return
+        st.session_state[result_key] = f"❌ Error processing {file.name}: {e}"
+        return st.session_state[result_key]
 
 # -------------------------------------------------
-# STREAMLIT UI
+# STREAMLIT UI (Modified for Session State Initialization)
 # -------------------------------------------------
+
+# Initialize session state for the list of uploaded files when the script starts
+if 'uploaded_files_keys' not in st.session_state:
+    st.session_state['uploaded_files_keys'] = []
 
 st.title("🏢 Unit Configuration Cleaner Tool")
 
+# Use a placeholder list to track the currently uploaded files' keys
+current_file_keys = [] 
+
+def handle_upload():
+    # Clear processing data if new files are uploaded
+    for key in st.session_state['uploaded_files_keys']:
+        del st.session_state[f'result_{key}']
+        if f'data_{key}' in st.session_state:
+            del st.session_state[f'data_{key}']
+    
+    # Map the new files to unique keys for session state management
+    st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(st.session_state.uploaded_files_widget))]
+    
+# Use a key to ensure the file_uploader persists its value across reruns
 uploaded_files = st.file_uploader(
     "Select Excel or CSV Files",
     type=['xlsx', 'csv'],
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    key='uploaded_files_widget',
+    on_change=handle_upload # Trigger function when files change
 )
 
 if uploaded_files:
-    st.info("Scroll down as each file will be processed one-by-one.")
+    # Ensure the keys are set correctly based on the current upload list
+    if len(st.session_state['uploaded_files_keys']) != len(uploaded_files):
+        # This handles the initial load where on_change might not have been triggered yet
+        st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(uploaded_files))]
+
+    st.info("Scroll down as each file will be processed one-by-one. Processing for each file will only proceed once any special character decisions are confirmed.")
     results = []
 
-    for i, file in enumerate(uploaded_files):
-        st.divider()
-        st.header(f"📄 Processing File {i+1}: {file.name}")
-        result = clean_units_streamlit(file, f"file_{i}")
+    # Loop through the files using their corresponding session state keys
+    for i, file_key in enumerate(st.session_state['uploaded_files_keys']):
+        file = uploaded_files[i] # Get the file object
+        
+        # Only display file processing information if the result isn't already saved (i.e., not fully processed)
+        if f"result_{file_key}" not in st.session_state:
+            st.divider()
+            st.header(f"📄 Processing File {i+1}: {file.name}")
+        
+        # The function will now handle saving the result to session state
+        result = clean_units_streamlit(file, file_key)
         results.append(result)
 
     st.divider()
     st.subheader("📌 Results Summary")
+    
+    # Display results for all files from the accumulated results list
     for res in results:
         st.write(res)
