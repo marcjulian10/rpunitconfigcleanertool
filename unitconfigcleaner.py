@@ -4,27 +4,39 @@ import os
 import re
 from io import StringIO, BytesIO
 
-# --- Original Logic (unchanged) ---
+# -------------------------------------------------
+# Original Logic (unchanged)
+# -------------------------------------------------
 
 def contains_special_chars(s):
     if pd.isna(s):
         return False
+
     pattern = re.compile(r'[^a-zA-Z0-9\s-]')
     return bool(pattern.search(str(s)))
 
+
 def read_file(file):
     filename = file.name.lower()
+
     if filename.endswith('.xlsx'):
         return pd.read_excel(file, dtype=str, keep_default_na=False, engine='openpyxl')
     elif filename.endswith('.csv'):
-        return pd.read_csv(file, dtype=str, keep_default_na=False)
+        # For CSV, try reading with 'utf-8' encoding first, then fall back to 'latin-1'
+        try:
+            return pd.read_csv(file, dtype=str, keep_default_na=False, encoding='utf-8')
+        except UnicodeDecodeError:
+            file.seek(0) # Reset file pointer for the next read attempt
+            return pd.read_csv(file, dtype=str, keep_default_na=False, encoding='latin-1')
     else:
         raise ValueError(f"Unsupported file format for {filename}. Please use .csv or .xlsx")
+
 
 def clean_tower(tower_value):
     if not tower_value or str(tower_value).strip().lower() in ['n/a', 'na', '', 'N/A']:
         return ''
     return str(tower_value).strip()
+
 
 # -------------------------------------------------
 # STREAMLIT SPECIAL CHARACTER REVIEW HANDLER (Modified for Session State)
@@ -68,8 +80,9 @@ def review_special_char_rows(df, file_key):
             "Delete These Rows": "delete",
             "Cancel Processing": "cancel"
         }.get(current_choice)
-        # Manually rerun the script after setting the decision to proceed
-        st.experimental_rerun() 
+        
+        # FIX: Use st.rerun() instead of the deprecated st.experimental_rerun()
+        st.rerun() 
 
     # Only show the button if a decision is pending
     if st.session_state[decision_key] is None:
@@ -79,6 +92,7 @@ def review_special_char_rows(df, file_key):
     
     # Return the saved decision
     return st.session_state[decision_key]
+
 
 # -------------------------------------------------
 # Main Cleaning Logic (Modified for Session State)
@@ -113,8 +127,7 @@ def clean_units_streamlit(file, file_key):
             st.subheader(f"File: {file.name}")
             decision = review_special_char_rows(problem_rows, file_key) 
             
-            # Note: review_special_char_rows now handles st.stop() when pending.
-            # If we reach here, a decision has been made and is saved in session state.
+            # If we reach here, a decision has been made (or st.stop() was called)
 
             if decision == "delete":
                 # Only delete from the working dataframe copy
@@ -168,8 +181,7 @@ def clean_units_streamlit(file, file_key):
 
         # 4. Output and Final Message
         
-        # We need to save the output data in session state for the download button
-        # to persist across reruns without re-calculating.
+        # Save the output data in session state for the download button
         output = df_unique.to_csv(index=False).encode('utf-8')
         st.session_state[f"output_{file_key}"] = output
 
@@ -195,6 +207,7 @@ def clean_units_streamlit(file, file_key):
         st.session_state[result_key] = f"❌ Error processing {file.name}: {e}"
         return st.session_state[result_key]
 
+
 # -------------------------------------------------
 # STREAMLIT UI (Modified for Session State Initialization)
 # -------------------------------------------------
@@ -205,18 +218,23 @@ if 'uploaded_files_keys' not in st.session_state:
 
 st.title("🏢 Unit Configuration Cleaner Tool")
 
-# Use a placeholder list to track the currently uploaded files' keys
-current_file_keys = [] 
-
 def handle_upload():
     # Clear processing data if new files are uploaded
+    keys_to_delete = []
     for key in st.session_state['uploaded_files_keys']:
-        del st.session_state[f'result_{key}']
-        if f'data_{key}' in st.session_state:
-            del st.session_state[f'data_{key}']
+        keys_to_delete.extend([f'result_{key}', f'data_{key}', f'decision_{key}', f'choice_{key}', f'output_{key}'])
+
+    for key in keys_to_delete:
+        if key in st.session_state:
+            del st.session_state[key]
     
     # Map the new files to unique keys for session state management
-    st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(st.session_state.uploaded_files_widget))]
+    # Note: st.session_state.uploaded_files_widget holds the new list of files
+    if st.session_state.uploaded_files_widget:
+        st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(st.session_state.uploaded_files_widget))]
+    else:
+         st.session_state['uploaded_files_keys'] = []
+
     
 # Use a key to ensure the file_uploader persists its value across reruns
 uploaded_files = st.file_uploader(
@@ -234,24 +252,37 @@ if uploaded_files:
         st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(uploaded_files))]
 
     st.info("Scroll down as each file will be processed one-by-one. Processing for each file will only proceed once any special character decisions are confirmed.")
+    
     results = []
+    has_pending_review = False # Flag to detect if we stopped processing
 
     # Loop through the files using their corresponding session state keys
     for i, file_key in enumerate(st.session_state['uploaded_files_keys']):
         file = uploaded_files[i] # Get the file object
         
         # Only display file processing information if the result isn't already saved (i.e., not fully processed)
-        if f"result_{file_key}" not in st.session_state:
-            st.divider()
-            st.header(f"📄 Processing File {i+1}: {file.name}")
+        # and we haven't hit a pending review yet.
+        is_processed = f"result_{file_key}" in st.session_state
         
-        # The function will now handle saving the result to session state
-        result = clean_units_streamlit(file, file_key)
-        results.append(result)
+        if not is_processed and not has_pending_review:
+            st.divider()
+            st.header(f"📄 Processing File {i+1}: **{file.name}**")
+        
+        # The function will now handle saving the result to session state and calling st.stop() if review is needed
+        try:
+            result = clean_units_streamlit(file, file_key)
+            results.append(result)
+        except st.ScriptRunner.StopException:
+             # This exception is raised when st.stop() is called inside clean_units_streamlit/review_special_char_rows
+            has_pending_review = True
+            break # Break the loop to ensure no further files are processed until the rerun
 
+    # After the loop, display the results summary
     st.divider()
     st.subheader("📌 Results Summary")
     
-    # Display results for all files from the accumulated results list
-    for res in results:
-        st.write(res)
+    # Display results for all files that have been processed or had their result stored
+    for i, file_key in enumerate(st.session_state['uploaded_files_keys']):
+        if f"result_{file_key}" in st.session_state:
+             st.write(st.session_state[f"result_{file_key}"])
+        # If the loop was stopped due to a pending review, the last file's decision is displayed above the divider
