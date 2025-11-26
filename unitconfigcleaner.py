@@ -308,10 +308,6 @@ def clean_units_streamlit(file, file_key):
 
                     return f"{tower} - {unit}"
 
-                elif tower and corp:
-
-                    return f"{tower} - {unit} - {corp}"
-
                 elif tower:
 
                     return f"{tower} - {unit}"
