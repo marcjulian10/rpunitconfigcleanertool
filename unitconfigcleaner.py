@@ -28,12 +28,10 @@ def contains_special_chars(s):
     
     s_str = str(s).strip()
     
-    # Explicitly allow N/A variants so they don't trigger the warning
+    # Explicitly allow N/A variants
     if s_str.upper() in ['N/A', 'NA', '']:
         return False
 
-    # Flag anything that is NOT a letter, number, space, or hyphen
-    # This will catch '/' (dates), '$', '#', '@', etc.
     pattern = re.compile(r'[^a-zA-Z0-9\s-]')
     return bool(pattern.search(s_str))
 
@@ -43,51 +41,80 @@ def clean_tower(tower_value):
     return str(tower_value).strip()
 
 # -------------------------------------------------
-# Review Handler (Restored & Improved)
+# UI Review Handlers
 # -------------------------------------------------
 
 def review_special_char_rows(df, file_key):
-    """
-    Handles user decision for special character rows using session state.
-    """
-    decision_key = f"decision_{file_key}"
+    decision_key = f"decision_spec_{file_key}"
     
-    st.warning("⚠️ Special characters (e.g. dates with slashes, symbols) detected in this file!")
-    st.write("Review the rows below. N/A values are ignored and considered safe.")
-
-    # Show a sample of the problematic rows
-    st.dataframe(df.head(100))
-    if len(df) > 100:
-        st.write(f"...and {len(df) - 100} more rows.")
+    st.warning("⚠️ Special characters (e.g. dates, symbols) detected!")
+    st.write("Review the rows below.")
+    st.dataframe(df.head(50))
 
     if decision_key not in st.session_state:
         st.session_state[decision_key] = None
 
-    # Callback to sync radio button with decision
-    def set_radio_choice():
-        st.session_state[f"choice_{file_key}"] = st.session_state[f"radio_{file_key}"]
+    def set_radio_spec():
+        st.session_state[f"choice_spec_{file_key}"] = st.session_state[f"radio_spec_{file_key}"]
 
     st.radio(
-        "Select an action:",
+        "Action for Special Characters:",
         ("Keep These Rows", "Delete These Rows", "Cancel Processing"),
-        key=f"radio_{file_key}",
-        on_change=set_radio_choice
+        key=f"radio_spec_{file_key}",
+        on_change=set_radio_spec
     )
 
-    # Get current choice (default to Keep)
-    current_choice = st.session_state.get(f"choice_{file_key}", "Keep These Rows")
+    current_choice = st.session_state.get(f"choice_spec_{file_key}", "Keep These Rows")
 
-    def set_decision():
+    def set_decision_spec():
         st.session_state[decision_key] = {
             "Keep These Rows": "keep",
             "Delete These Rows": "delete",
             "Cancel Processing": "cancel"
         }.get(current_choice)
-        # No rerun here, let the script flow continue or stop naturally next cycle
-        
+
     if st.session_state[decision_key] is None:
-        st.button("Confirm Choice", key=f"confirm_{file_key}", on_click=set_decision)
-        st.stop() # Halt execution until button is clicked
+        st.button("Confirm Special Chars", key=f"btn_spec_{file_key}", on_click=set_decision_spec)
+        st.stop()
+    
+    return st.session_state[decision_key]
+
+
+def review_duplicate_rows(df, file_key):
+    """
+    New Handler for Duplicate Unit + Tower combinations
+    """
+    decision_key = f"decision_dup_{file_key}"
+    
+    st.warning("⚠️ Duplicate Unit & Tower combinations detected!")
+    st.write("The following rows have identical Unit and Tower values:")
+    st.dataframe(df.head(50))
+
+    if decision_key not in st.session_state:
+        st.session_state[decision_key] = None
+
+    def set_radio_dup():
+        st.session_state[f"choice_dup_{file_key}"] = st.session_state[f"radio_dup_{file_key}"]
+
+    st.radio(
+        "Action for Duplicates:",
+        ("Keep All (2+ Rows)", "Retain 1 Row", "Cancel Processing"),
+        key=f"radio_dup_{file_key}",
+        on_change=set_radio_dup
+    )
+
+    current_choice = st.session_state.get(f"choice_dup_{file_key}", "Keep All (2+ Rows)")
+
+    def set_decision_dup():
+        st.session_state[decision_key] = {
+            "Keep All (2+ Rows)": "keep",
+            "Retain 1 Row": "retain_one",
+            "Cancel Processing": "cancel"
+        }.get(current_choice)
+
+    if st.session_state[decision_key] is None:
+        st.button("Confirm Duplicates", key=f"btn_dup_{file_key}", on_click=set_decision_dup)
+        st.stop()
     
     return st.session_state[decision_key]
 
@@ -102,7 +129,6 @@ def clean_units_streamlit(file, file_key):
         return st.session_state[result_key]
 
     try:
-        # We store the raw dataframe in session state so we don't re-read the file on every interaction
         data_key = f"data_{file_key}"
         if data_key not in st.session_state:
             st.session_state[data_key] = read_file(file)
@@ -119,39 +145,68 @@ def clean_units_streamlit(file, file_key):
             return st.session_state[result_key]
 
         # -----------------------------------------
-        # Check for Special Characters (Dates/Symbols)
+        # 1. Check Special Characters
         # -----------------------------------------
-        # We only check the Unit column for special characters as that is the critical identifier
         special_char_mask = df[unit_col].apply(contains_special_chars)
         problem_rows = df[special_char_mask]
         deleted_rows_count = 0
 
         if not problem_rows.empty:
-            st.subheader(f"File: {file.name}")
-            decision = review_special_char_rows(problem_rows, file_key) 
+            st.subheader(f"Step 1: Special Characters ({file.name})")
+            decision_spec = review_special_char_rows(problem_rows, file_key) 
 
-            if decision == "delete":
+            if decision_spec == "delete":
                 df.drop(problem_rows.index, inplace=True)
                 deleted_rows_count = len(problem_rows)
-            elif decision == "cancel":
+            elif decision_spec == "cancel":
                 st.session_state[result_key] = f"🟡 Canceled processing for {file.name}."
                 return st.session_state[result_key]
-            # If "keep", we just proceed without changes
 
         # -----------------------------------------
-        # Logic: Build Unique Unit String
+        # 2. Check Duplicates (Unit + Tower)
         # -----------------------------------------
+        # Create temp columns to strictly check duplicates ignoring whitespace
+        df['__temp_unit'] = df[unit_col].apply(lambda x: str(x).strip())
+        df['__temp_tower'] = df[tower_col].apply(clean_tower) if tower_col else ''
         
-        df['_CleanUnit'] = df[unit_col].apply(lambda x: str(x).strip())
-        duplicate_units = df[df.duplicated('_CleanUnit', keep=False)]
+        # Check for duplicates on these two columns
+        dup_mask = df.duplicated(subset=['__temp_unit', '__temp_tower'], keep=False)
+        dup_rows = df[dup_mask]
+        
+        duplicate_decision = "retain_one" # Default behavior if no duplicates found
+
+        if not dup_rows.empty:
+            st.divider()
+            st.subheader(f"Step 2: Duplicates ({file.name})")
+            duplicate_decision = review_duplicate_rows(dup_rows, file_key)
+
+            if duplicate_decision == "retain_one":
+                # Keep first, drop rest
+                df.drop_duplicates(subset=['__temp_unit', '__temp_tower'], keep='first', inplace=True)
+            elif duplicate_decision == "cancel":
+                st.session_state[result_key] = f"🟡 Canceled processing for {file.name} (Duplicates)."
+                return st.session_state[result_key]
+            # If "keep", we do nothing here and let them pass to the builder
+
+        # -----------------------------------------
+        # 3. Build Unique Unit Strings
+        # -----------------------------------------
+        # Refresh temp columns after potential drops
+        df['__temp_unit'] = df[unit_col].apply(lambda x: str(x).strip())
+        df['_CleanUnit'] = df['__temp_unit'] # Legacy compatibility for builder
+        
+        # Re-calculate duplicates for the Naming Logic
+        # Note: If user chose "Keep", we still want to try to name them intelligently if possible,
+        # but if they are identical Unit+Tower, they will result in identical names.
+        duplicate_units_global = df[df.duplicated('_CleanUnit', keep=False)]
 
         def build_unit(row):
             unit = row['_CleanUnit']
             tower = clean_tower(row[tower_col]) if tower_col else ''
             corp = str(row[corp_col]).strip() if corp_col and pd.notna(row[corp_col]) else ''
 
-            if unit in duplicate_units['_CleanUnit'].values:
-                same_unit_rows = duplicate_units[duplicate_units['_CleanUnit'] == unit]
+            if unit in duplicate_units_global['_CleanUnit'].values:
+                same_unit_rows = duplicate_units_global[duplicate_units_global['_CleanUnit'] == unit]
                 unique_towers = same_unit_rows[tower_col].dropna().apply(clean_tower).unique()
 
                 if tower and len(unique_towers) > 1:
@@ -167,16 +222,24 @@ def clean_units_streamlit(file, file_key):
 
         df['Unit'] = df.apply(build_unit, axis=1)
 
-        # Deduplicate
-        df_unique = df.drop_duplicates(subset=['Unit']).reset_index(drop=True)
-        df_unique = df_unique.drop_duplicates()
+        # -----------------------------------------
+        # 4. Final Cleanup & Output
+        # -----------------------------------------
         
-        if '_CleanUnit' in df_unique.columns:
-            df_unique.drop(columns=['_CleanUnit'], inplace=True)
+        # If the user chose "Retain 1", we ensure uniqueness on the final 'Unit' column.
+        # If the user chose "Keep", we skip the final deduplication on 'Unit' to preserve the rows they asked for.
+        if duplicate_decision == "retain_one":
+            df_unique = df.drop_duplicates(subset=['Unit']).reset_index(drop=True)
+        else:
+            # Keep all rows, even if 'Unit' string is identical
+            df_unique = df.reset_index(drop=True)
+
+        # Remove temp columns
+        cols_to_drop = ['_CleanUnit', '__temp_unit', '__temp_tower']
+        df_unique.drop(columns=[c for c in cols_to_drop if c in df_unique.columns], inplace=True)
         
         df_unique.replace({'N/A': '', 'n/a': '', 'na': '', '': ''}, inplace=True)
 
-        # Output
         output = df_unique.to_csv(index=False).encode('utf-8')
         st.session_state[f"output_{file_key}"] = output
 
@@ -191,7 +254,7 @@ def clean_units_streamlit(file, file_key):
         result_message = f"✅ Processed: {file.name}\n"
         if deleted_rows_count > 0:
             result_message += f"🗑️ Deleted {deleted_rows_count} rows with special characters.\n"
-        result_message += f"🔢 Total Unique Units: {len(df_unique)}"
+        result_message += f"🔢 Total Rows: {len(df_unique)}"
 
         st.session_state[result_key] = result_message
         return st.session_state[result_key]
@@ -212,12 +275,14 @@ st.title("🏢 Unit Configuration Cleaner Tool")
 
 def handle_upload():
     keys_to_delete = []
+    # Clean up all possible session state keys for files
     for key in st.session_state['uploaded_files_keys']:
-        keys_to_delete.extend([f'result_{key}', f'data_{key}', f'decision_{key}', f'choice_{key}', f'output_{key}', f'radio_{key}'])
-
-    for key in keys_to_delete:
-        if key in st.session_state:
-            del st.session_state[key]
+        suffixes = ['result', 'data', 'decision_spec', 'choice_spec', 'radio_spec', 
+                    'decision_dup', 'choice_dup', 'radio_dup', 'output']
+        for suf in suffixes:
+            full_key = f"{suf}_{key}"
+            if full_key in st.session_state:
+                del st.session_state[full_key]
     
     if st.session_state.uploaded_files_widget:
         st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(st.session_state.uploaded_files_widget))]
@@ -237,7 +302,7 @@ if uploaded_files:
     if len(st.session_state['uploaded_files_keys']) != len(uploaded_files):
         st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(uploaded_files))]
 
-    st.info("Files are processed sequentially. If a file requires review, please select an option and click Confirm.")
+    st.info("Files are processed sequentially. You may be prompted to review special characters or duplicates.")
     
     results = []
 
