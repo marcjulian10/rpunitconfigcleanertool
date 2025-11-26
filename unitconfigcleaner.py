@@ -9,9 +9,7 @@ from io import StringIO, BytesIO
 # -------------------------------------------------
 
 def is_date_format(s):
-"""
-Checks if a string looks like a date (e.g., 2023-01-01, 12/12/2023, 10.10.20).
-"""
+
 s_str = str(s).strip()
 # Regex checks for digits separated by -, /, or .
 # Matches patterns like: 1-1-1, 2023-10-10, 10/10/2020, 2020.01.01
