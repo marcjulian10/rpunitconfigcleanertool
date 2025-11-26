@@ -36,7 +36,7 @@ def contains_special_chars(s):
 
     # for manual review. They will be removed silently later.
 
-    if s_str.upper() in ['N/A', 'NA']:
+    if s_str.upper() in ['N/A', 'NA', 'n/a', 'na','']:
 
         return False
 
