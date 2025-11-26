@@ -1,328 +1,515 @@
 import streamlit as st
+
 import pandas as pd
+
 import os
+
 import re
+
 from io import StringIO, BytesIO
 
+
+
 # -------------------------------------------------
-# Helpers
+
+# Original Logic (Modified)
+
 # -------------------------------------------------
 
-def is_date_format(s):
 
-s_str = str(s).strip()
-# Regex checks for digits separated by -, /, or .
-# Matches patterns like: 1-1-1, 2023-10-10, 10/10/2020, 2020.01.01
-date_pattern = re.compile(r'\d{1,4}[-./]\d{1,2}[-./]\d{1,4}')
-return bool(date_pattern.search(s_str))
 
-def contains_issues(s):
-"""
-Checks for special characters OR date patterns.
-Strict Mode: Only Alphanumeric and Spaces are allowed.
-"""
-if pd.isna(s):
-return False
+def contains_special_chars(s):
 
-s_str = str(s).strip()
+    if pd.isna(s):
 
-# Ignore "N/A" variants/empties
-if s_str.upper() in ['N/A', 'NA', 'n/a', 'na', '']:
-return False
+        return False
 
-# 1. Check for Date-like patterns explicitly
-if is_date_format(s_str):
-return True
 
-# 2. Strict Special Character Check
-# Flags ANYTHING that is not a Letter (a-z), Number (0-9), or Space.
-# This intentionally flags Hyphens (-), Slashes (/), Dots (.), etc.
-strict_pattern = re.compile(r'[^a-zA-Z0-9\s]')
-return bool(strict_pattern.search(s_str))
+
+    s_str = str(s).strip()
+
+    
+
+    # MODIFICATION: Ignore "N/A" variants. 
+
+    # Even though they contain '/' (special char), we don't want to flag them 
+
+    # for manual review. They will be removed silently later.
+
+    if s_str.upper() in ['N/A', 'NA', 'n/a', 'na','']:
+
+        return False
+
+
+
+    pattern = re.compile(r'[^a-zA-Z0-9\s-]')
+
+    return bool(pattern.search(s_str))
+
+
+
 
 
 def read_file(file):
-filename = file.name.lower()
-if filename.endswith('.xlsx'):
-return pd.read_excel(file, dtype=str, keep_default_na=False, engine='openpyxl')
-elif filename.endswith('.csv'):
-try:
-return pd.read_csv(file, dtype=str, keep_default_na=False, encoding='utf-8')
-except UnicodeDecodeError:
-file.seek(0)
-return pd.read_csv(file, dtype=str, keep_default_na=False, encoding='latin-1')
-else:
-raise ValueError(f"Unsupported file format for {filename}. Please use .csv or .xlsx")
+
+    filename = file.name.lower()
+
+
+
+    if filename.endswith('.xlsx'):
+
+        return pd.read_excel(file, dtype=str, keep_default_na=False, engine='openpyxl')
+
+    elif filename.endswith('.csv'):
+
+        try:
+
+            return pd.read_csv(file, dtype=str, keep_default_na=False, encoding='utf-8')
+
+        except UnicodeDecodeError:
+
+            file.seek(0)
+
+            return pd.read_csv(file, dtype=str, keep_default_na=False, encoding='latin-1')
+
+    else:
+
+        raise ValueError(f"Unsupported file format for {filename}. Please use .csv or .xlsx")
+
+
+
 
 
 def clean_tower(tower_value):
-# This ensures N/A is removed/turned into empty string
-if not tower_value or str(tower_value).strip().lower() in ['n/a', 'na', '', 'N/A']:
-return ''
-return str(tower_value).strip()
+
+    # This ensures N/A is removed/turned into empty string
+
+    if not tower_value or str(tower_value).strip().lower() in ['n/a', 'na', '', 'N/A']:
+
+        return ''
+
+    return str(tower_value).strip()
 
 
-# -------------------------------------------------
-# INTERACTIVE REVIEW HANDLERS
-# -------------------------------------------------
 
-def review_issues(df, file_key):
-"""
-Handles user decision for invalid Unit rows (Special Chars or Dates).
-"""
-decision_key = f"issue_decision_{file_key}"
-
-st.warning(f"⚠️ Issues detected in the 'Unit' column of {len(df)} rows!")
-st.write("These rows contain **Special Characters (like hyphens)** or **Date Formats**.")
-st.write("Please review and decide:")
-
-st.dataframe(df)
-
-if decision_key not in st.session_state:
-st.session_state[decision_key] = None
-
-def set_issue_choice():
-st.session_state[f"issue_choice_val_{file_key}"] = st.session_state[f"issue_radio_{file_key}"]
-
-st.radio(
-"Select an action:",
-("Keep These Rows", "Delete These Rows", "Cancel Processing"),
-key=f"issue_radio_{file_key}",
-on_change=set_issue_choice
-)
-
-current_choice = st.session_state.get(f"issue_choice_val_{file_key}", "Keep These Rows")
-
-def set_decision():
-st.session_state[decision_key] = {
-"Keep These Rows": "keep",
-"Delete These Rows": "delete",
-"Cancel Processing": "cancel"
-}.get(current_choice)
-st.rerun()
-
-if st.session_state[decision_key] is None:
-st.button("Confirm Action", key=f"confirm_issue_{file_key}", on_click=set_decision)
-st.stop()
-
-return st.session_state[decision_key]
-
-
-def review_duplicates(df, duplicates_df, file_key):
-"""
-Handles user decision for duplicate Unit rows.
-"""
-decision_key = f"dup_decision_{file_key}"
-
-st.warning(f"⚠️ {len(duplicates_df)} Duplicate entries found (same Tower + Unit combination)!")
-st.write("These rows result in identical Unit IDs.")
-
-st.dataframe(duplicates_df.sort_values(by='Unit'))
-
-if decision_key not in st.session_state:
-st.session_state[decision_key] = None
-
-def set_dup_choice():
-st.session_state[f"dup_choice_val_{file_key}"] = st.session_state[f"dup_radio_{file_key}"]
-
-st.radio(
-"Select duplicate handling:",
-("Keep All Copies", "Retain 1 Copy (Remove Duplicates)", "Cancel Processing"),
-key=f"dup_radio_{file_key}",
-on_change=set_dup_choice
-)
-
-current_choice = st.session_state.get(f"dup_choice_val_{file_key}", "Keep All Copies")
-
-def set_decision():
-st.session_state[decision_key] = {
-"Keep All Copies": "keep_all",
-"Retain 1 Copy (Remove Duplicates)": "retain_one",
-"Cancel Processing": "cancel"
-}.get(current_choice)
-st.rerun()
-
-if st.session_state[decision_key] is None:
-st.button("Confirm Duplicate Action", key=f"confirm_dup_{file_key}", on_click=set_decision)
-st.stop()
-
-return st.session_state[decision_key]
 
 
 # -------------------------------------------------
+
+# STREAMLIT SPECIAL CHARACTER REVIEW HANDLER
+
+# -------------------------------------------------
+
+
+
+def review_special_char_rows(df, file_key):
+
+    """
+
+    Handles user decision for special character rows using session state.
+
+    """
+
+    decision_key = f"decision_{file_key}"
+
+   
+
+    st.warning("⚠️ Special characters detected in this file!")
+
+    st.write("Choose whether to keep or delete the rows before continuing.")
+
+
+
+    st.dataframe(df)
+
+
+
+    if decision_key not in st.session_state:
+
+        st.session_state[decision_key] = None
+
+
+
+    def set_radio_choice():
+
+        st.session_state[f"choice_{file_key}"] = st.session_state[f"radio_{file_key}"]
+
+
+
+    st.radio(
+
+        "Select an action:",
+
+        ("Keep These Rows", "Delete These Rows", "Cancel Processing"),
+
+        key=f"radio_{file_key}",
+
+        on_change=set_radio_choice
+
+    )
+
+
+
+    current_choice = st.session_state.get(f"choice_{file_key}", "Keep These Rows")
+
+
+
+    def set_decision():
+
+        st.session_state[decision_key] = {
+
+            "Keep These Rows": "keep",
+
+            "Delete These Rows": "delete",
+
+            "Cancel Processing": "cancel"
+
+        }.get(current_choice)
+
+        st.rerun()
+
+
+
+    if st.session_state[decision_key] is None:
+
+        st.button("Confirm", key=f"confirm_{file_key}", on_click=set_decision)
+
+        st.stop() # This halts the script execution here
+
+   
+
+    return st.session_state[decision_key]
+
+
+
+
+
+# -------------------------------------------------
+
 # Main Cleaning Logic
+
 # -------------------------------------------------
+
+
 
 def clean_units_streamlit(file, file_key):
-result_key = f"result_{file_key}"
 
-if result_key in st.session_state:
-return st.session_state[result_key]
+    result_key = f"result_{file_key}"
 
-try:
-data_key = f"data_{file_key}"
-if data_key not in st.session_state:
-st.session_state[data_key] = read_file(file)
+   
 
-df = st.session_state[data_key].copy()
+    if result_key in st.session_state:
 
-# Identify Columns
-tower_col = next((c for c in df.columns if 'tower' in c.lower()), None)
-unit_col = next((c for c in df.columns if 'unit' in c.lower()), None)
+        return st.session_state[result_key]
 
-if not unit_col:
-st.session_state[result_key] = f"⚠️ No 'Unit' column found in {file.name}."
-return st.session_state[result_key]
 
-# ---------------------------
-# CHECK 1: Issues (Special Chars / Dates) in UNIT COLUMN ONLY
-# ---------------------------
 
-# We check specifically for date formats or disallowed characters
-issue_mask = df[unit_col].astype(str).apply(contains_issues)
-problem_rows = df[issue_mask]
-deleted_rows_count = 0
+    try:
 
-if not problem_rows.empty:
-st.subheader(f"File: {file.name}")
-decision = review_issues(problem_rows, file_key)
+        data_key = f"data_{file_key}"
 
-if decision == "delete":
-df.drop(problem_rows.index, inplace=True)
-deleted_rows_count = len(problem_rows)
-elif decision == "cancel":
-st.session_state[result_key] = f"🟡 Canceled processing for {file.name} (Issues Detected)."
-return st.session_state[result_key]
+        if data_key not in st.session_state:
 
-# ---------------------------
-# CONSTRUCT UNIT STRING
-# ---------------------------
-df['_CleanUnit'] = df[unit_col].astype(str).apply(lambda x: x.strip())
+            st.session_state[data_key] = read_file(file)
 
-def build_unit(row):
-unit = row['_CleanUnit']
-tower = clean_tower(row[tower_col]) if tower_col else ''
 
-# Logic: If Tower exists, concatenate it.
-if tower:
-return f"{tower} - {unit}"
-else:
-return unit
 
-df['Unit'] = df.apply(build_unit, axis=1)
+        df = st.session_state[data_key].copy()
 
-# ---------------------------
-# CHECK 2: Duplicates
-# ---------------------------
-duplicate_mask = df.duplicated(subset=['Unit'], keep=False)
-duplicates_df = df[duplicate_mask]
+       
 
-if not duplicates_df.empty:
-st.subheader(f"File: {file.name}")
-dup_decision = review_duplicates(df, duplicates_df, file_key)
+        # This will now skip rows that only contain "N/A"
 
-if dup_decision == "retain_one":
-# Keep first occurrence, drop rest
-df = df.drop_duplicates(subset=['Unit'], keep='first')
-elif dup_decision == "cancel":
-st.session_state[result_key] = f"🟡 Canceled processing for {file.name} (Duplicates)."
-return st.session_state[result_key]
+        special_char_mask = df.apply(
 
-# ---------------------------
-# FINAL CLEANUP & OUTPUT
-# ---------------------------
-df_final = df.reset_index(drop=True)
-if '_CleanUnit' in df_final.columns:
-df_final.drop(columns=['_CleanUnit'], inplace=True)
+            lambda row: row.astype(str).apply(contains_special_chars).any(),
 
-# Final cleanup for any remaining N/A strings
-df_final.replace({'N/A': '', 'n/a': '', 'na': '', '': ''}, inplace=True)
+            axis=1
 
-output = df_final.to_csv(index=False).encode('utf-8')
-st.session_state[f"output_{file_key}"] = output
+        )
 
-st.download_button(
-label=f"⬇️ Download Cleaned File ({file.name})",
-data=output,
-file_name=file.name.replace('.xlsx', '_cleaned.csv').replace('.csv', '_cleaned.csv'),
-mime='text/csv',
-key=f"download_{file_key}"
-)
 
-result_message = f"✅ Processed: {file.name}\n"
-if deleted_rows_count > 0:
-result_message += f"🗑️ Deleted {deleted_rows_count} rows with issues (Dates/Special Chars).\n"
-result_message += f"🔢 Final Row Count: {len(df_final)}"
 
-st.session_state[result_key] = result_message
-return st.session_state[result_key]
+        problem_rows = df[special_char_mask]
 
-except Exception as e:
-st.session_state[result_key] = f"❌ Error processing {file.name}: {e}"
-return st.session_state[result_key]
+        deleted_rows_count = 0
+
+
+
+        if not problem_rows.empty:
+
+            st.subheader(f"File: {file.name}")
+
+            # This function will call st.stop() internally if waiting for input
+
+            decision = review_special_char_rows(problem_rows, file_key)
+
+
+
+            if decision == "delete":
+
+                df.drop(problem_rows.index, inplace=True)
+
+                deleted_rows_count = len(problem_rows)
+
+
+
+            elif decision == "cancel":
+
+                st.session_state[result_key] = f"🟡 Canceled processing for {file.name}."
+
+                return st.session_state[result_key]
+
+
+
+        tower_col = next((c for c in df.columns if 'tower' in c.lower()), None)
+
+        unit_col = next((c for c in df.columns if 'unit' in c.lower()), None)
+
+        corp_col = next((c for c in df.columns if 'corporate' in c.lower()), None)
+
+
+
+        if not unit_col:
+
+            st.session_state[result_key] = f"⚠️ No 'Unit' column found in {file.name}."
+
+            return st.session_state[result_key]
+
+
+
+        df['_CleanUnit'] = df[unit_col].apply(lambda x: x.strip())
+
+        duplicate_units = df[df.duplicated('_CleanUnit', keep=False)]
+
+
+
+        def build_unit(row):
+
+            unit = row['_CleanUnit']
+
+            # clean_tower checks for N/A and returns ''
+
+            tower = clean_tower(row[tower_col]) if tower_col else ''
+
+            corp = row[corp_col].strip() if corp_col and pd.notna(row[corp_col]) else ''
+
+
+
+            if unit in duplicate_units['_CleanUnit'].values:
+
+                same_unit_rows = duplicate_units[duplicate_units['_CleanUnit'] == unit]
+
+                unique_towers = same_unit_rows[tower_col].dropna().apply(clean_tower).unique()
+
+
+
+                if tower and len(unique_towers) > 1:
+
+                    return f"{tower} - {unit}"
+
+                elif tower and corp:
+
+                    return f"{tower} - {unit} - {corp}"
+
+                elif tower:
+
+                    return f"{tower} - {unit}"
+
+                else:
+
+                    return unit
+
+            else:
+
+                return unit
+
+
+
+        df['Unit'] = df.apply(build_unit, axis=1)
+
+
+
+        df_unique = df.drop_duplicates(subset=['Unit']).reset_index(drop=True)
+
+        df_unique = df_unique.drop_duplicates()
+
+        df_unique.drop(columns=['_CleanUnit'], inplace=True)
+
+        
+
+        # Final cleanup for any remaining N/A strings in the dataframe
+
+        df_unique.replace({'N/A': '', 'n/a': '', 'na': '', '': ''}, inplace=True)
+
+
+
+        output = df_unique.to_csv(index=False).encode('utf-8')
+
+        st.session_state[f"output_{file_key}"] = output
+
+
+
+        st.download_button(
+
+            label=f"⬇️ Download Cleaned File ({file.name})",
+
+            data=output,
+
+            file_name=file.name.replace('.xlsx', '_cleaned.csv').replace('.csv', '_cleaned.csv'),
+
+            mime='text/csv',
+
+            key=f"download_{file_key}"
+
+        )
+
+
+
+        result_message = f"✅ Processed: {file.name}\n"
+
+        if deleted_rows_count > 0:
+
+            result_message += f"🗑️ Deleted {deleted_rows_count} rows with special characters.\n"
+
+        result_message += f"🔢 Total Unique Units: {len(df_unique)}"
+
+
+
+        st.session_state[result_key] = result_message
+
+        return st.session_state[result_key]
+
+
+
+    except Exception as e:
+
+        st.session_state[result_key] = f"❌ Error processing {file.name}: {e}"
+
+        return st.session_state[result_key]
+
+
+
 
 
 # -------------------------------------------------
+
 # STREAMLIT UI
+
 # -------------------------------------------------
+
+
 
 if 'uploaded_files_keys' not in st.session_state:
-st.session_state['uploaded_files_keys'] = []
+
+    st.session_state['uploaded_files_keys'] = []
+
+
 
 st.title("🏢 Unit Configuration Cleaner Tool")
 
+
+
 def handle_upload():
-# Clear all session state related to file processing
-keys_to_delete = []
-# Find all keys starting with our prefixes
-prefixes = ['result_', 'data_', 'issue_decision_', 'issue_choice_val_', 'dup_decision_', 'dup_choice_val_', 'output_']
 
-for key in st.session_state.keys():
-for prefix in prefixes:
-if key.startswith(prefix):
-keys_to_delete.append(key)
+    keys_to_delete = []
 
-for key in keys_to_delete:
-del st.session_state[key]
+    for key in st.session_state['uploaded_files_keys']:
 
-if st.session_state.uploaded_files_widget:
-st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(st.session_state.uploaded_files_widget))]
-else:
-st.session_state['uploaded_files_keys'] = []
+        keys_to_delete.extend([f'result_{key}', f'data_{key}', f'decision_{key}', f'choice_{key}', f'output_{key}'])
 
+
+
+    for key in keys_to_delete:
+
+        if key in st.session_state:
+
+            del st.session_state[key]
+
+   
+
+    if st.session_state.uploaded_files_widget:
+
+        st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(st.session_state.uploaded_files_widget))]
+
+    else:
+
+         st.session_state['uploaded_files_keys'] = []
+
+
+
+   
 
 uploaded_files = st.file_uploader(
-"Select Excel or CSV Files",
-type=['xlsx', 'csv'],
-accept_multiple_files=True,
-key='uploaded_files_widget',
-on_change=handle_upload
+
+    "Select Excel or CSV Files",
+
+    type=['xlsx', 'csv'],
+
+    accept_multiple_files=True,
+
+    key='uploaded_files_widget',
+
+    on_change=handle_upload
+
 )
 
+
+
 if uploaded_files:
-if len(st.session_state['uploaded_files_keys']) != len(uploaded_files):
-st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(uploaded_files))]
 
-st.info("Files are processed sequentially. You may be prompted to make decisions for Special Characters/Dates (Unit only) and Duplicates.")
+    if len(st.session_state['uploaded_files_keys']) != len(uploaded_files):
 
-results = []
+        st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(uploaded_files))]
 
-# Loop through the files
-for i, file_key in enumerate(st.session_state['uploaded_files_keys']):
-file = uploaded_files[i]
 
-is_processed = f"result_{file_key}" in st.session_state
 
-if not is_processed:
-st.divider()
-st.header(f"📄 Processing File {i+1}: **{file.name}**")
+    st.info("Scroll down as each file will be processed one-by-one. Processing for each file will only proceed once any special character decisions are confirmed.")
 
-result = clean_units_streamlit(file, file_key)
-results.append(result)
+   
 
-st.divider()
-st.subheader("📌 Results Summary")
+    results = []
 
-for i, file_key in enumerate(st.session_state['uploaded_files_keys']):
-if f"result_{file_key}" in st.session_state:
-st.write(st.session_state[f"result_{file_key}"])
+
+
+    # Loop through the files
+
+    for i, file_key in enumerate(st.session_state['uploaded_files_keys']):
+
+        file = uploaded_files[i]
+
+       
+
+        is_processed = f"result_{file_key}" in st.session_state
+
+       
+
+        if not is_processed:
+
+            st.divider()
+
+            st.header(f"📄 Processing File {i+1}: **{file.name}**")
+
+       
+
+        # Simply call the function. If it hits st.stop(), the script execution ends immediately.
+
+        # We do not need to try/except StopException.
+
+        result = clean_units_streamlit(file, file_key)
+
+        results.append(result)
+
+
+
+    st.divider()
+
+    st.subheader("📌 Results Summary")
+
+   
+
+    for i, file_key in enumerate(st.session_state['uploaded_files_keys']):
+
+        if f"result_{file_key}" in st.session_state:
+
+             st.write(st.session_state[f"result_{file_key}"])
