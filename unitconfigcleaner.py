@@ -35,10 +35,19 @@ def contains_special_chars(s):
     pattern = re.compile(r'[^a-zA-Z0-9\s-]')
     return bool(pattern.search(s_str))
 
-def clean_tower(tower_value):
-    if not tower_value or str(tower_value).strip().lower() in ['n/a', 'na', '', 'N/A']:
+def clean_field(value):
+    """
+    Standard cleaner for Tower and Corp fields.
+    Returns empty string if value is N/A, NA, na, or blank.
+    """
+    if pd.isna(value):
         return ''
-    return str(tower_value).strip()
+    
+    val_str = str(value).strip()
+    if val_str.lower() in ['n/a', 'na', '', 'blank']:
+        return ''
+    
+    return val_str
 
 # -------------------------------------------------
 # UI Review Handlers
@@ -82,7 +91,7 @@ def review_special_char_rows(df, file_key):
 
 def review_duplicate_rows(df, file_key):
     """
-    New Handler for Duplicate Unit + Tower combinations
+    Handler for Duplicate Unit + Tower combinations
     """
     decision_key = f"decision_dup_{file_key}"
     
@@ -167,7 +176,7 @@ def clean_units_streamlit(file, file_key):
         # -----------------------------------------
         # Create temp columns to strictly check duplicates ignoring whitespace
         df['__temp_unit'] = df[unit_col].apply(lambda x: str(x).strip())
-        df['__temp_tower'] = df[tower_col].apply(clean_tower) if tower_col else ''
+        df['__temp_tower'] = df[tower_col].apply(clean_field) if tower_col else ''
         
         # Check for duplicates on these two columns
         dup_mask = df.duplicated(subset=['__temp_unit', '__temp_tower'], keep=False)
@@ -186,55 +195,54 @@ def clean_units_streamlit(file, file_key):
             elif duplicate_decision == "cancel":
                 st.session_state[result_key] = f"🟡 Canceled processing for {file.name} (Duplicates)."
                 return st.session_state[result_key]
-            # If "keep", we do nothing here and let them pass to the builder
 
         # -----------------------------------------
-        # 3. Build Unique Unit Strings
+        # 3. Build Unit Strings (Always Concatenate)
         # -----------------------------------------
         # Refresh temp columns after potential drops
         df['__temp_unit'] = df[unit_col].apply(lambda x: str(x).strip())
-        df['_CleanUnit'] = df['__temp_unit'] # Legacy compatibility for builder
+        df['_CleanUnit'] = df['__temp_unit']
         
-        # Re-calculate duplicates for the Naming Logic
-        # Note: If user chose "Keep", we still want to try to name them intelligently if possible,
-        # but if they are identical Unit+Tower, they will result in identical names.
-        duplicate_units_global = df[df.duplicated('_CleanUnit', keep=False)]
+        def build_unit_unconditional(row):
+            # 1. Gather raw values
+            raw_unit = row['_CleanUnit']
+            raw_tower = row[tower_col] if tower_col else ''
+            raw_corp = row[corp_col] if corp_col else ''
 
-        def build_unit(row):
-            unit = row['_CleanUnit']
-            tower = clean_tower(row[tower_col]) if tower_col else ''
-            corp = str(row[corp_col]).strip() if corp_col and pd.notna(row[corp_col]) else ''
+            # 2. Clean values (removes N/A, Blank, NA, na)
+            unit = clean_field(raw_unit) # Though unit usually shouldn't be NA if we got this far
+            tower = clean_field(raw_tower)
+            corp = clean_field(raw_corp)
 
-            if unit in duplicate_units_global['_CleanUnit'].values:
-                same_unit_rows = duplicate_units_global[duplicate_units_global['_CleanUnit'] == unit]
-                unique_towers = same_unit_rows[tower_col].dropna().apply(clean_tower).unique()
+            # 3. Concatenate non-empty parts
+            parts = []
+            
+            # Add Tower first if exists
+            if tower:
+                parts.append(tower)
+            
+            # Add Unit (Essential)
+            if unit:
+                parts.append(unit)
+                
+            # Add Corporate if exists
+            if corp:
+                parts.append(corp)
 
-                if tower and len(unique_towers) > 1:
-                    return f"{tower} - {unit}"
-                elif tower and corp:
-                    return f"{tower} - {unit} - {corp}"
-                elif tower:
-                    return f"{tower} - {unit}"
-                else:
-                    return unit
-            else:
-                return unit
+            # Join with hyphens
+            return " - ".join(parts)
 
-        df['Unit'] = df.apply(build_unit, axis=1)
+        df['Unit'] = df.apply(build_unit_unconditional, axis=1)
 
         # -----------------------------------------
         # 4. Final Cleanup & Output
         # -----------------------------------------
         
-        # If the user chose "Retain 1", we ensure uniqueness on the final 'Unit' column.
-        # If the user chose "Keep", we skip the final deduplication on 'Unit' to preserve the rows they asked for.
         if duplicate_decision == "retain_one":
             df_unique = df.drop_duplicates(subset=['Unit']).reset_index(drop=True)
         else:
-            # Keep all rows, even if 'Unit' string is identical
             df_unique = df.reset_index(drop=True)
 
-        # Remove temp columns
         cols_to_drop = ['_CleanUnit', '__temp_unit', '__temp_tower']
         df_unique.drop(columns=[c for c in cols_to_drop if c in df_unique.columns], inplace=True)
         
@@ -315,7 +323,6 @@ if uploaded_files:
             st.divider()
             st.header(f"📄 Processing File {i+1}: **{file.name}**")
         
-        # This function calls st.stop() if user input is needed
         result = clean_units_streamlit(file, file_key)
         results.append(result)
 
