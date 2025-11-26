@@ -36,7 +36,7 @@ def contains_special_chars(s):
 
     # for manual review. They will be removed silently later.
 
-    if s_str.upper() in ['N/A', 'NA', 'n/a', 'na','']:
+    if s_str.upper() in ['N/A', 'NA']:
 
         return False
 
@@ -307,6 +307,10 @@ def clean_units_streamlit(file, file_key):
                 if tower and len(unique_towers) > 1:
 
                     return f"{tower} - {unit}"
+
+                elif tower and corp:
+
+                    return f"{tower} - {unit} - {corp}"
 
                 elif tower:
 
