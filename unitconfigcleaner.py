@@ -5,16 +5,8 @@ import re
 from io import StringIO, BytesIO
 
 # -------------------------------------------------
-# Original Logic (unchanged)
+# File Reading & Helper Functions
 # -------------------------------------------------
-
-def contains_special_chars(s):
-    if pd.isna(s):
-        return False
-
-    pattern = re.compile(r'[^a-zA-Z0-9\s-]')
-    return bool(pattern.search(str(s)))
-
 
 def read_file(file):
     filename = file.name.lower()
@@ -32,94 +24,28 @@ def read_file(file):
 
 
 def clean_tower(tower_value):
+    # We still treat N/A as empty for the purpose of building the string (e.g. "Tower - Unit"), 
+    # but we don't flag the row as an error anymore.
     if not tower_value or str(tower_value).strip().lower() in ['n/a', 'na', '', 'N/A']:
         return ''
     return str(tower_value).strip()
 
-
 # -------------------------------------------------
-# STREAMLIT SPECIAL CHARACTER REVIEW HANDLER
-# -------------------------------------------------
-
-def review_special_char_rows(df, file_key):
-    """
-    Handles user decision for special character rows using session state.
-    """
-    decision_key = f"decision_{file_key}"
-    
-    st.warning("⚠️ Special characters detected in this file!")
-    st.write("Choose whether to keep or delete the rows before continuing.")
-
-    st.dataframe(df)
-
-    if decision_key not in st.session_state:
-        st.session_state[decision_key] = None
-
-    def set_radio_choice():
-        st.session_state[f"choice_{file_key}"] = st.session_state[f"radio_{file_key}"]
-
-    st.radio(
-        "Select an action:",
-        ("Keep These Rows", "Delete These Rows", "Cancel Processing"),
-        key=f"radio_{file_key}",
-        on_change=set_radio_choice
-    )
-
-    current_choice = st.session_state.get(f"choice_{file_key}", "Keep These Rows")
-
-    def set_decision():
-        st.session_state[decision_key] = {
-            "Keep These Rows": "keep",
-            "Delete These Rows": "delete",
-            "Cancel Processing": "cancel"
-        }.get(current_choice)
-        st.rerun()
-
-    if st.session_state[decision_key] is None:
-        st.button("Confirm", key=f"confirm_{file_key}", on_click=set_decision)
-        st.stop() # This halts the script execution here
-    
-    return st.session_state[decision_key]
-
-
-# -------------------------------------------------
-# Main Cleaning Logic
+# Main Cleaning Logic (Streamlined)
 # -------------------------------------------------
 
 def clean_units_streamlit(file, file_key):
     result_key = f"result_{file_key}"
     
+    # If already processed, return cached result
     if result_key in st.session_state:
         return st.session_state[result_key]
 
     try:
-        data_key = f"data_{file_key}"
-        if data_key not in st.session_state:
-            st.session_state[data_key] = read_file(file)
+        # Read Data
+        df = read_file(file)
 
-        df = st.session_state[data_key].copy()
-        
-        special_char_mask = df.apply(
-            lambda row: row.astype(str).apply(contains_special_chars).any(),
-            axis=1
-        )
-
-        problem_rows = df[special_char_mask]
-        deleted_rows_count = 0
-
-        if not problem_rows.empty:
-            st.subheader(f"File: {file.name}")
-            # This function will call st.stop() internally if waiting for input
-            decision = review_special_char_rows(problem_rows, file_key) 
-
-            if decision == "delete":
-                df.drop(problem_rows.index, inplace=True)
-                deleted_rows_count = len(problem_rows)
-
-            elif decision == "cancel":
-                st.session_state[result_key] = f"🟡 Canceled processing for {file.name}."
-                return st.session_state[result_key]
-
+        # Identify Columns
         tower_col = next((c for c in df.columns if 'tower' in c.lower()), None)
         unit_col = next((c for c in df.columns if 'unit' in c.lower()), None)
         corp_col = next((c for c in df.columns if 'corporate' in c.lower()), None)
@@ -128,18 +54,27 @@ def clean_units_streamlit(file, file_key):
             st.session_state[result_key] = f"⚠️ No 'Unit' column found in {file.name}."
             return st.session_state[result_key]
 
-        df['_CleanUnit'] = df[unit_col].apply(lambda x: x.strip())
+        # -----------------------------------------
+        # Logic: Build Unique Unit String
+        # -----------------------------------------
+        
+        # Create a temp clean column for duplicate detection
+        df['_CleanUnit'] = df[unit_col].apply(lambda x: str(x).strip())
+        
+        # Identify duplicates based strictly on the Unit name
         duplicate_units = df[df.duplicated('_CleanUnit', keep=False)]
 
         def build_unit(row):
             unit = row['_CleanUnit']
             tower = clean_tower(row[tower_col]) if tower_col else ''
-            corp = row[corp_col].strip() if corp_col and pd.notna(row[corp_col]) else ''
+            corp = str(row[corp_col]).strip() if corp_col and pd.notna(row[corp_col]) else ''
 
+            # If this unit name appears multiple times in the file, we append Tower/Corp info to make it unique
             if unit in duplicate_units['_CleanUnit'].values:
                 same_unit_rows = duplicate_units[duplicate_units['_CleanUnit'] == unit]
                 unique_towers = same_unit_rows[tower_col].dropna().apply(clean_tower).unique()
 
+                # Logic: Combine Tower/Unit/Corp based on available data to create uniqueness
                 if tower and len(unique_towers) > 1:
                     return f"{tower} - {unit}"
                 elif tower and corp:
@@ -149,18 +84,28 @@ def clean_units_streamlit(file, file_key):
                 else:
                     return unit
             else:
+                # No duplicate unit name? Just return the unit name.
                 return unit
 
+        # Apply the logic
         df['Unit'] = df.apply(build_unit, axis=1)
 
+        # Deduplicate the final dataframe
         df_unique = df.drop_duplicates(subset=['Unit']).reset_index(drop=True)
         df_unique = df_unique.drop_duplicates()
-        df_unique.drop(columns=['_CleanUnit'], inplace=True)
+        
+        # Cleanup
+        if '_CleanUnit' in df_unique.columns:
+            df_unique.drop(columns=['_CleanUnit'], inplace=True)
+        
+        # Ensure N/A strings are empty in the final output for cleanliness
         df_unique.replace({'N/A': '', 'n/a': '', 'na': '', '': ''}, inplace=True)
 
+        # Prepare Download
         output = df_unique.to_csv(index=False).encode('utf-8')
         st.session_state[f"output_{file_key}"] = output
 
+        # Show Download Button
         st.download_button(
             label=f"⬇️ Download Cleaned File ({file.name})",
             data=output,
@@ -170,8 +115,6 @@ def clean_units_streamlit(file, file_key):
         )
 
         result_message = f"✅ Processed: {file.name}\n"
-        if deleted_rows_count > 0:
-            result_message += f"🗑️ Deleted {deleted_rows_count} rows with special characters.\n"
         result_message += f"🔢 Total Unique Units: {len(df_unique)}"
 
         st.session_state[result_key] = result_message
@@ -192,9 +135,10 @@ if 'uploaded_files_keys' not in st.session_state:
 st.title("🏢 Unit Configuration Cleaner Tool")
 
 def handle_upload():
+    # Clear previous results when new files are uploaded/changed
     keys_to_delete = []
     for key in st.session_state['uploaded_files_keys']:
-        keys_to_delete.extend([f'result_{key}', f'data_{key}', f'decision_{key}', f'choice_{key}', f'output_{key}'])
+        keys_to_delete.extend([f'result_{key}', f'output_{key}'])
 
     for key in keys_to_delete:
         if key in st.session_state:
@@ -217,8 +161,6 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     if len(st.session_state['uploaded_files_keys']) != len(uploaded_files):
         st.session_state['uploaded_files_keys'] = [f"file_{i}" for i in range(len(uploaded_files))]
-
-    st.info("Scroll down as each file will be processed one-by-one. Processing for each file will only proceed once any special character decisions are confirmed.")
     
     results = []
 
@@ -232,8 +174,6 @@ if uploaded_files:
             st.divider()
             st.header(f"📄 Processing File {i+1}: **{file.name}**")
         
-        # Simply call the function. If it hits st.stop(), the script execution ends immediately.
-        # We do not need to try/except StopException.
         result = clean_units_streamlit(file, file_key)
         results.append(result)
 
