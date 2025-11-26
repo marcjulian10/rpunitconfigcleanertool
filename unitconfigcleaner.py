@@ -224,10 +224,6 @@ def clean_units_streamlit(file, file_key):
             # Add Unit (Essential)
             if unit:
                 parts.append(unit)
-                
-            # Add Corporate if exists
-            if corp:
-                parts.append(corp)
 
             # Join with hyphens
             return " - ".join(parts)
