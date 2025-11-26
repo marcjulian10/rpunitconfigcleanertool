@@ -1,3 +1,5 @@
+CAUTION: This email originated from outside of the organization. Do not click links or open attachments unless you recognize the sender and know the content is safe.
+
 import streamlit as st
 
 import pandas as pd
@@ -30,13 +32,9 @@ def contains_special_chars(s):
 
     
 
-    # MODIFICATION: Ignore "N/A" variants. 
+    # Ignore "N/A" variants. 
 
-    # Even though they contain '/' (special char), we don't want to flag them 
-
-    # for manual review. They will be removed silently later.
-
-    if s_str.upper() in ['N/A', 'NA', 'n/a', 'na','']:
+    if s_str.upper() in ['N/A', 'NA']:
 
         return False
 
@@ -218,7 +216,7 @@ def clean_units_streamlit(file, file_key):
 
        
 
-        # This will now skip rows that only contain "N/A"
+        # Skip rows that only contain "N/A" regarding special char check
 
         special_char_mask = df.apply(
 
@@ -239,8 +237,6 @@ def clean_units_streamlit(file, file_key):
         if not problem_rows.empty:
 
             st.subheader(f"File: {file.name}")
-
-            # This function will call st.stop() internally if waiting for input
 
             decision = review_special_char_rows(problem_rows, file_key)
 
@@ -280,7 +276,11 @@ def clean_units_streamlit(file, file_key):
 
         df['_CleanUnit'] = df[unit_col].apply(lambda x: x.strip())
 
-        duplicate_units = df[df.duplicated('_CleanUnit', keep=False)]
+        
+
+        # MODIFICATION: Removed duplicate calculation. 
+
+        # Logic is now strictly based on presence of Tower/Corp values.
 
 
 
@@ -288,37 +288,21 @@ def clean_units_streamlit(file, file_key):
 
             unit = row['_CleanUnit']
 
-            # clean_tower checks for N/A and returns ''
-
             tower = clean_tower(row[tower_col]) if tower_col else ''
 
             corp = row[corp_col].strip() if corp_col and pd.notna(row[corp_col]) else ''
 
 
 
-            if unit in duplicate_units['_CleanUnit'].values:
+            # If Tower exists, ALWAYS concatenate, regardless of duplicates
 
-                same_unit_rows = duplicate_units[duplicate_units['_CleanUnit'] == unit]
+            if tower and corp:
 
-                unique_towers = same_unit_rows[tower_col].dropna().apply(clean_tower).unique()
+                return f"{tower} - {unit} - {corp}"
 
+            elif tower:
 
-
-                if tower and len(unique_towers) > 1:
-
-                    return f"{tower} - {unit}"
-
-                elif tower and corp:
-
-                    return f"{tower} - {unit} - {corp}"
-
-                elif tower:
-
-                    return f"{tower} - {unit}"
-
-                else:
-
-                    return unit
+                return f"{tower} - {unit}"
 
             else:
 
@@ -338,7 +322,7 @@ def clean_units_streamlit(file, file_key):
 
         
 
-        # Final cleanup for any remaining N/A strings in the dataframe
+        # Final cleanup for any remaining N/A strings
 
         df_unique.replace({'N/A': '', 'n/a': '', 'na': '', '': ''}, inplace=True)
 
@@ -491,10 +475,6 @@ if uploaded_files:
             st.header(f"📄 Processing File {i+1}: **{file.name}**")
 
        
-
-        # Simply call the function. If it hits st.stop(), the script execution ends immediately.
-
-        # We do not need to try/except StopException.
 
         result = clean_units_streamlit(file, file_key)
 
